@@ -1,0 +1,160 @@
+name: Custom Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: "App name"
+        required: false
+        default: "Photo widget"
+        type: string
+      app_version:
+        description: "App version"
+        required: false
+        default: "1.0.0"
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Patch app name and version
+        env:
+          APP_NAME: ${{ github.event.inputs.app_name || 'Photo widget' }}
+          APP_VERSION: ${{ github.event.inputs.app_version || '1.0.0' }}
+        run: |
+          VERSION_CODE="$(date +%s)"
+          export VERSION_CODE
+          python3 - <<'PY'
+          import os
+          import re
+
+          app_name = os.environ["APP_NAME"]
+          app_version = os.environ["APP_VERSION"]
+          version_code = os.environ["VERSION_CODE"]
+
+          # XML-escape the app name (& first, then < > ")
+          xml_name = (
+              app_name.replace("&", "&amp;")
+              .replace("<", "&lt;")
+              .replace(">", "&gt;")
+              .replace('"', "&quot;")
+          )
+
+          manifest_path = "app/src/main/AndroidManifest.xml"
+          with open(manifest_path, "r", encoding="utf-8") as f:
+              manifest = f.read()
+
+          label_pattern = r'(<application\b[^>]*?android:label=")[^"]*(")'
+          if re.search(label_pattern, manifest, flags=re.DOTALL):
+              manifest = re.sub(
+                  label_pattern,
+                  lambda m: m.group(1) + xml_name + m.group(2),
+                  manifest,
+                  count=1,
+                  flags=re.DOTALL,
+              )
+          else:
+              manifest = re.sub(
+                  r"<application\b",
+                  lambda m: '<application android:label="' + xml_name + '"',
+                  manifest,
+                  count=1,
+              )
+
+          with open(manifest_path, "w", encoding="utf-8") as f:
+              f.write(manifest)
+
+          # Escape the version for use inside a Kotlin string literal
+          kt_version = (
+              app_version.replace("\\", "\\\\")
+              .replace('"', '\\"')
+              .replace("$", "\\$")
+          )
+
+          gradle_path = "app/build.gradle.kts"
+          with open(gradle_path, "r", encoding="utf-8") as f:
+              gradle = f.read()
+
+          gradle = re.sub(
+              r'versionName\s*=\s*"[^"]*"',
+              lambda m: 'versionName = "' + kt_version + '"',
+              gradle,
+              count=1,
+          )
+          gradle = re.sub(
+              r"versionCode\s*=\s*\d+",
+              lambda m: "versionCode = " + version_code,
+              gradle,
+              count=1,
+          )
+
+          with open(gradle_path, "w", encoding="utf-8") as f:
+              f.write(gradle)
+
+          print("Patched app name:", app_name)
+          print("Patched version:", app_version, "(code " + version_code + ")")
+          PY
+
+      - name: Apply custom icon (optional)
+        run: |
+          if [ -f build-icon.png ]; then
+            echo "build-icon.png found, applying custom icon"
+            for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+              mkdir -p "app/src/main/res/mipmap-$d"
+              cp build-icon.png "app/src/main/res/mipmap-$d/ic_launcher.png"
+              cp build-icon.png "app/src/main/res/mipmap-$d/ic_launcher_round.png"
+            done
+            # Remove adaptive icon XMLs so the PNG icons are actually used
+            rm -f app/src/main/res/mipmap-anydpi/ic_launcher.xml
+            rm -f app/src/main/res/mipmap-anydpi/ic_launcher_round.xml
+            rm -f app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+            rm -f app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+            python3 - <<'PY'
+          import re
+
+          manifest_path = "app/src/main/AndroidManifest.xml"
+          with open(manifest_path, "r", encoding="utf-8") as f:
+              manifest = f.read()
+
+          app_tag = re.search(r"<application\b[^>]*>", manifest, flags=re.DOTALL)
+          if app_tag and "android:icon" not in app_tag.group(0):
+              manifest = re.sub(
+                  r"<application\b",
+                  lambda m: '<application android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round"',
+                  manifest,
+                  count=1,
+              )
+              with open(manifest_path, "w", encoding="utf-8") as f:
+                  f.write(manifest)
+              print("Added android:icon and android:roundIcon to manifest")
+          else:
+              print("android:icon already present in manifest, leaving it as is")
+          PY
+          else
+            echo "build-icon.png not found, continuing with the default icon"
+          fi
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
