@@ -21,6 +21,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Locate Android project
+        run: |
+          if [ -f app/src/main/AndroidManifest.xml ] && [ -f app/build.gradle.kts ]; then
+            echo "Android project found at repo root"
+          else
+            APP_GRADLE="$(find . -path ./.git -prune -o -path '*/app/build.gradle.kts' -print | head -n 1)"
+            if [ -z "$APP_GRADLE" ]; then
+              echo "::error::No Android project in the repo (expected app/build.gradle.kts). Upload the QuickSend project files first."
+              ls -R . | head -50
+              exit 1
+            fi
+            ROOT="$(dirname "$(dirname "$APP_GRADLE")")"
+            if [ ! -f "$ROOT/app/src/main/AndroidManifest.xml" ]; then
+              echo "::error::Found $APP_GRADLE but app/src/main/AndroidManifest.xml is missing next to it."
+              exit 1
+            fi
+            echo "Project found in $ROOT, moving it to the repo root"
+            cp -a "$ROOT"/. .
+          fi
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
